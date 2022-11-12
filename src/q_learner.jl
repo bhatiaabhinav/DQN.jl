@@ -10,6 +10,7 @@ export DQNLearner
 
 mutable struct DQNLearner{T<:AbstractFloat} <: AbstractHook
     π::DQNPolicy{T}
+    γ::Float32
     ρ::Float32
     min_explore_steps::Int
     train_interval::Int
@@ -20,9 +21,11 @@ mutable struct DQNLearner{T<:AbstractFloat} <: AbstractHook
     qmodel′
     optim::Adam
 
-    function DQNLearner(π::DQNPolicy{T}, α; polyak=0.995, min_explore_steps=10000, train_interval=1, batch_size=32, buffer_size=1000000) where T <: AbstractFloat
+    stats::Dict{Symbol, Float32}
+
+    function DQNLearner(π::DQNPolicy{T}, γ, α; polyak=0.995, min_explore_steps=10000, train_interval=1, batch_size=32, buffer_size=1000000) where T <: AbstractFloat
         buff = CircularBuffer{Tuple{Vector{T}, Int, Float64, Vector{T}, Bool}}(buffer_size)
-        new{T}(π, polyak, min_explore_steps, train_interval, batch_size, nothing, buff, deepcopy(π.qmodel), Adam(α))
+        new{T}(π, γ, polyak, min_explore_steps, train_interval, batch_size, nothing, buff, deepcopy(π.qmodel), Adam(α), Dict{Symbol, Float32}())
     end
 end
 
@@ -30,10 +33,10 @@ function prestep(dqn::DQNLearner; env::AbstractMDP, kwargs...)
     dqn.s = copy(state(env))
 end
 
-function poststep(dqn::DQNLearner{T}; env::AbstractMDP{Vector{T}, Int}, steps::Int, rng::AbstractRNG, kwargs...) where T <: AbstractFloat
-    @unpack π, ρ, batch_size, s, qmodel′ = dqn
+function poststep(dqn::DQNLearner{T}; env::AbstractMDP{Vector{T}, Int}, steps::Int, rng::AbstractRNG, returns, kwargs...) where T <: AbstractFloat
+    @unpack π, γ, ρ, batch_size, s, qmodel′ = dqn
 
-    a, r, s′, d, γ = action(env), reward(env), copy(state(env)), in_absorbing_state(env), discount_factor(env)
+    a, r, s′, d = action(env), reward(env), copy(state(env)), in_absorbing_state(env)
     push!(dqn.buff, (s, a, r, s′, d))
 
     if steps >= dqn.min_explore_steps && steps % dqn.train_interval == 0
@@ -50,7 +53,7 @@ function poststep(dqn::DQNLearner{T}; env::AbstractMDP{Vector{T}, Int}, steps::I
                 𝐪′ = qmodel′(𝐬′)
                 𝐯′ = sum(𝛑′ .* 𝐪′, dims=1)[1, :]
                 𝛅 = zeros(Float32, size(𝐪̂)) # TD error
-                𝛅[𝐚_𝐬] = 𝐫 + (1 .- 𝐝) * Float32(γ) .* 𝐯′ - @view 𝐪̂[𝐚_𝐬]
+                𝛅[𝐚_𝐬] = 𝐫 + (1 .- 𝐝) * γ .* 𝐯′ - @view 𝐪̂[𝐚_𝐬]
                 𝐪̂ + 𝛅
             end
             Flux.mse(𝐪̂, 𝐪)
@@ -63,7 +66,10 @@ function poststep(dqn::DQNLearner{T}; env::AbstractMDP{Vector{T}, Int}, steps::I
 
         if steps % 1000 == 0
             v̄ = mean(sum(π(𝐬, :) .* π.qmodel(𝐬), dims=1))
-            @info "learning stats" steps ℓ v̄
+            episodes = length(returns)
+            dqn.stats[:ℓ] = ℓ
+            dqn.stats[:v̄] = v̄
+            @debug "learning stats" steps episodes dqn.stats...
         end
     end
     nothing
