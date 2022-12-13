@@ -1,5 +1,6 @@
 using MDPs
 using Random
+using Flux
 
 export DQNPolicy
 
@@ -9,6 +10,11 @@ struct DQNPolicy{T<:AbstractFloat} <: AbstractPolicy{Vector{T}, Int}
     ϵ::Float64
     n::Int
 end
+
+Flux.@functor DQNPolicy (qmodel, )
+
+Flux.gpu(p::DQNPolicy{T}) where T = DQNPolicy{T}(Flux.gpu(p.qmodel), ϵ, n) 
+Flux.cpu(p::DQNPolicy{T}) where T = DQNPolicy{T}(Flux.cpu(p.qmodel), ϵ, n)
 
 function (p::DQNPolicy{T})(rng::AbstractRNG, 𝐬::Vector{T})::Int where T<:AbstractFloat
     return rand(rng) < p.ϵ ? rand(rng, 1:p.n) : (𝐬 |> tof32 |> p.qmodel |> argmax)
