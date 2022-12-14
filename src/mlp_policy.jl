@@ -13,8 +13,8 @@ end
 
 Flux.@functor DQNPolicy (qmodel, )
 
-Flux.gpu(p::DQNPolicy{T}) where T = DQNPolicy{T}(Flux.gpu(p.qmodel), ϵ, n) 
-Flux.cpu(p::DQNPolicy{T}) where T = DQNPolicy{T}(Flux.cpu(p.qmodel), ϵ, n)
+Flux.gpu(p::DQNPolicy{T}) where T = DQNPolicy{T}(Flux.gpu(p.qmodel), p.ϵ, p.n) 
+Flux.cpu(p::DQNPolicy{T}) where T = DQNPolicy{T}(Flux.cpu(p.qmodel), p.ϵ, p.n)
 
 function (p::DQNPolicy{T})(rng::AbstractRNG, 𝐬::Vector{T})::Int where T<:AbstractFloat
     return rand(rng) < p.ϵ ? rand(rng, 1:p.n) : (𝐬 |> tof32 |> p.qmodel |> argmax)
@@ -36,11 +36,12 @@ function (p::DQNPolicy)(rng::AbstractRNG, 𝐬::AbstractMatrix{<:AbstractFloat})
     return (𝐳 .< p.ϵ) .* 𝐚_random + (𝐳 .>= p.ϵ) .* 𝐚_greedy
 end
 
-function (p::DQNPolicy)(𝐬::AbstractMatrix{<:AbstractFloat}, ::Colon)::Matrix{Float32}
+function (p::DQNPolicy)(𝐬::AbstractMatrix{<:AbstractFloat}, ::Colon)::AbstractMatrix{Float32}
     𝐪 = p.qmodel(tof32(𝐬))
-    𝛑 = zeros(Float32, size(𝐪))
-    𝛑[argmax(𝐪, dims=1)] .= 1
-    return p.ϵ / p.n .+ (1 - p.ϵ) * 𝛑
+    # println(typeof(𝐪))
+    𝛑 = convert(typeof(𝐪), zeros(Float32, size(𝐪)))
+    𝛑[argmax(𝐪, dims=1)] .= 1f0
+    return Float32(p.ϵ) / p.n .+ (1f0 - Float32(p.ϵ)) * 𝛑
 end
 
 
