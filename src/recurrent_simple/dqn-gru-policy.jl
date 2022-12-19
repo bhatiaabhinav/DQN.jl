@@ -32,7 +32,7 @@ function (p::ContextualDQNPolicy{T})(rng::AbstractRNG, o::Vector{T})::Int where 
     return a[1]
 end
 
-function (p::ContextualDQNPolicy{T})(o::Vector{T}, a::Int)::Float64 where {T}  # returns log probability
+function (p::ContextualDQNPolicy{T})(o::Vector{T}, a::Int)::Float64 where {T}  # returns probability
     set_rnn_state!(p.crnn, p.context)
     evidence = reshape(vcat(p.isnewtraj, p.prev_a, p.prev_r, tof32(o), 0f0), :, 1)
     c = p.crnn(evidence)
@@ -45,18 +45,18 @@ end
 function MDPs.preepisode(p::ContextualDQNPolicy{T}; kwargs...) where {T}
     @debug "Resetting policy"
     p.isnewtraj = 1f0
-    p.prev_a .= 0f0
+    fill!(p.prev_a, 0f0)
     p.prev_r = 0
-    p.context .= 0f0
+    fill!(p.context, 0f0)
     nothing
 end
 
 function MDPs.poststep(p::ContextualDQNPolicy{T}; env, kwargs...) where {T}
     p.isnewtraj = 0f0
-    p.prev_a .= 0f0
+    fill!(p.prev_a, 0f0)
     p.prev_a[action(env)] = 1f0
     p.prev_r = reward(env)
-    p.context .= get_rnn_state(p.crnn)
+    copy!(p.context, get_rnn_state(p.crnn))
     @debug "Storing action, reward, grustate in policy struct"
     nothing
 end

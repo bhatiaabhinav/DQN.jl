@@ -142,7 +142,7 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
             𝐪̂′ = qmodel′(𝐬′)
             𝐯̂′ = sum(𝛑′ .* 𝐪̂′, dims=1)[:, ]
             𝐨 = reshape(𝐨, :, horizon * batch_size)
-            𝐚 = argmax(reshape(𝐚, :, horizon * batch_size), dims=1) # CartesianIndices
+            𝐚 = argmax(reshape(𝐚, :, horizon * batch_size), dims=1)[1, :] # CartesianIndices
             𝐫 = reshape(𝐫, horizon * batch_size)
             𝐝′ = reshape(𝐝′, horizon * batch_size)
             𝐧′ = reshape(𝐧′, horizon * batch_size)
@@ -156,7 +156,7 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
                 𝐬 = vcat(_𝐜, 𝐨)
                 𝐪̂ = policy.qmodel(𝐬)
                 v̄ += Zygote.@ignore mean(sum(policy(𝐬, :) .* 𝐪̂, dims=1))
-                𝛅 = (𝐫 + γ * (1f0 .- 𝐝′) .* 𝐯̂′ - 𝐪̂[𝐚][1, :]) .* (1f0 .- 𝐧′)
+                𝛅 = (𝐫 + γ * (1f0 .- 𝐝′) .* 𝐯̂′ - 𝐪̂[𝐚]) .* (1f0 .- 𝐧′)
                 return mean(𝛅.^2)
             end
             Flux.update!(dqn.optim, θ, ∇θℓ)
