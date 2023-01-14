@@ -25,7 +25,7 @@ mutable struct RecurrentDQNLearner{T} <: AbstractHook
 
     stats::Dict{Symbol, Float32}
 
-    function RecurrentDQNLearner(π::ContextualDQNPolicy{T}, γ::Real, horizon::Int, η, aspace::MDPs.IntegerSpace, sspace; polyak=0.995, batch_size=32, min_explore_steps=horizon*batch_size, tbptt_horizon=horizon, buffer_size=10000000, buff_mem_MB_cap=Inf, device=Flux.cpu) where {T <: AbstractFloat}
+    function RecurrentDQNLearner(π::ContextualDQNPolicy{T}, γ::Real, horizon::Int, aspace::MDPs.IntegerSpace, sspace; η=0.0003, polyak=0.995, batch_size=32, min_explore_steps=horizon*batch_size, tbptt_horizon=horizon, buffer_size=10000000, buff_mem_MB_cap=Inf, device=Flux.cpu) where {T <: AbstractFloat}
         each_entry_size = 1 + length(aspace) + 1 + size(sspace, 1) + 1
         buffer_size = min(buffer_size, buff_mem_MB_cap * 2^20 / (4 * each_entry_size)) |> floor |> Int
         buff = zeros(Float32, each_entry_size, buffer_size)
@@ -125,7 +125,7 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
 
     push_to_buff!(dqn, false, action(env), reward(env), state(env), in_absorbing_state(env), action_space(env))
 
-    if steps >= dqn.min_explore_steps && (steps % 50 == 0)
+    if steps >= dqn.min_explore_steps && (steps % (horizon ÷ tbptt_horizon) == 0)
         @debug "sampling trajectories"
         𝐞, 𝐨, 𝐚, 𝐫, 𝐨′, 𝐝′, 𝐧′  = sample_from_buff!(dqn, env)
         # note: 𝐚 is onehot!
