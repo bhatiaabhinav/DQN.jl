@@ -2,10 +2,10 @@ using MDPs
 using Random
 using Flux
 
-export DQNPolicy
+export DQNPolicy, EpsilonDecayHook
 
 
-struct DQNPolicy{T<:AbstractFloat} <: AbstractPolicy{Vector{T}, Int}
+mutable struct DQNPolicy{T<:AbstractFloat} <: AbstractPolicy{Vector{T}, Int}
     qmodel
     ϵ::Float64
     n::Int
@@ -49,4 +49,17 @@ end
 
 function tof32(𝐱::AbstractArray{<:Real, N})::AbstractArray{Float32, N} where N
     convert(AbstractArray{Float32, N}, 𝐱)
+end
+
+
+struct EpsilonDecayHook <: AbstractHook
+    policy::DQNPolicy
+    decay_rate::Float64
+    min_value::Float64
+end
+
+function MDPs.poststep(edh::EpsilonDecayHook; kwargs...)
+    edh.policy.ϵ -= edh.decay_rate
+    edh.policy.ϵ = max(edh.policy.ϵ, edh.min_value)
+    nothing
 end

@@ -1,7 +1,7 @@
 name = "DQN"
 uuid = "7f74fec5-260e-497f-a584-a002915ddfd3"
 authors = ["Abhinav Bhatia <abhinav.bhatia.me@gmail.com>"]
-version = "0.5.0"
+version = "0.5.1"
 
 [deps]
 DataStructures = "864edb3b-99cc-5e75-8d2d-829cb0a9cfe8"
