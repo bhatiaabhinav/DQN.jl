@@ -21,11 +21,11 @@ mutable struct RecurrentDQNLearner{T} <: AbstractHook
     policy::DQNPolicy{T}                    # train this policy and periodically copy weights to the original policy
     policy_crnn::GRUContextRNN              # train this context rnn and periodically copy weights to the original context rnn
     qmodel′                                 # target qmodel
-    optim::Adam
+    optim
 
     stats::Dict{Symbol, Float32}
 
-    function RecurrentDQNLearner(π::ContextualDQNPolicy{T}, γ::Real, horizon::Int, aspace::MDPs.IntegerSpace, sspace; η=0.0003, polyak=0.995, batch_size=32, min_explore_steps=horizon*batch_size, tbptt_horizon=horizon, buffer_size=10000000, buff_mem_MB_cap=Inf, device=Flux.cpu) where {T <: AbstractFloat}
+    function RecurrentDQNLearner(π::ContextualDQNPolicy{T}, γ::Real, horizon::Int, aspace::MDPs.IntegerSpace, sspace; η=0.0003, polyak=0.995, batch_size=32, min_explore_steps=horizon*batch_size, tbptt_horizon=horizon, buffer_size=10000000, buff_mem_MB_cap=Inf, clipnorm=Inf, device=Flux.cpu) where {T <: AbstractFloat}
         each_entry_size = 1 + length(aspace) + 1 + size(sspace, 1) + 1
         buffer_size = min(buffer_size, buff_mem_MB_cap * 2^20 / (4 * each_entry_size)) |> floor |> Int
         buff = zeros(Float32, each_entry_size, buffer_size)
@@ -37,8 +37,10 @@ mutable struct RecurrentDQNLearner{T} <: AbstractHook
         𝐝′ = zeros(Float32, horizon, batch_size) |> device
         𝐧′ = zeros(Float32, horizon, batch_size) |> device
         minibatch = (𝐞, 𝐨, 𝐚, 𝐫, 𝐨′, 𝐝′, 𝐧′)
+        optim = Adam(η)
+        if clipnorm < Inf; optim = Flux.Optimiser(Flux.Optimise.ClipNorm(clipnorm), optim); end
         𝐜 = zeros(Float32, size(get_rnn_state(π.crnn), 1), horizon + 1, batch_size) |> device
-        new{T}(π, γ, polyak, min_explore_steps, batch_size, horizon, tbptt_horizon, device, buff, 1, Set{Int}(), minibatch, 𝐜, device(deepcopy(π.π)), device(deepcopy(π.crnn)), device(deepcopy(π.π.qmodel)), Adam(η), Dict{Symbol, Float32}())
+        new{T}(π, γ, polyak, min_explore_steps, batch_size, horizon, tbptt_horizon, device, buff, 1, Set{Int}(), minibatch, 𝐜, device(deepcopy(π.π)), device(deepcopy(π.crnn)), device(deepcopy(π.π.qmodel)), optim, Dict{Symbol, Float32}())
     end
 end
 
