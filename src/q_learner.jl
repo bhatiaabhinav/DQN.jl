@@ -23,10 +23,14 @@ mutable struct DQNLearner{T<:AbstractFloat} <: AbstractHook
 
     stats::Dict{Symbol, Float32}
 
-    function DQNLearner(π::DQNPolicy{T}, γ, α; polyak=0.995, min_explore_steps=10000, train_interval=1, batch_size=32, buffer_size=1000000, clipnorm=Inf) where T <: AbstractFloat
+    function DQNLearner(π::DQNPolicy{T}, γ, α; polyak=0.995, min_explore_steps=10000, train_interval=1, batch_size=32, buffer_size=1000000, clipnorm=Inf, clipval=Inf) where T <: AbstractFloat
         buff = CircularBuffer{Tuple{Vector{T}, Int, Float64, Vector{T}, Bool}}(buffer_size)
         optim = Adam(α)
-        if clipnorm < Inf; optim = Flux.Optimiser(Flux.Optimise.ClipNorm(clipnorm), optim); end
+        if clipnorm < Inf;
+            optim = Flux.Optimiser(Flux.Optimise.ClipNorm(clipnorm), optim)
+        else
+            if clipval < Inf; optim = Flux.Optimiser(Flux.Optimise.ClipNorm(clipnorm), optim); end
+        end
         new{T}(π, γ, polyak, min_explore_steps, train_interval, batch_size, nothing, buff, deepcopy(π.qmodel), optim, Dict{Symbol, Float32}())
     end
 end

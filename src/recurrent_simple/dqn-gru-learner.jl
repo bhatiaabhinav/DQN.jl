@@ -25,7 +25,7 @@ mutable struct RecurrentDQNLearner{T} <: AbstractHook
 
     stats::Dict{Symbol, Float32}
 
-    function RecurrentDQNLearner(π::ContextualDQNPolicy{T}, γ::Real, horizon::Int, aspace::MDPs.IntegerSpace, sspace; η=0.0003, polyak=0.995, batch_size=32, min_explore_steps=horizon*batch_size, tbptt_horizon=horizon, buffer_size=10000000, buff_mem_MB_cap=Inf, clipnorm=Inf, device=Flux.cpu) where {T <: AbstractFloat}
+    function RecurrentDQNLearner(π::ContextualDQNPolicy{T}, γ::Real, horizon::Int, aspace::MDPs.IntegerSpace, sspace; η=0.0003, polyak=0.995, batch_size=32, min_explore_steps=horizon*batch_size, tbptt_horizon=horizon, buffer_size=10000000, buff_mem_MB_cap=Inf, clipnorm=Inf, clipval=Inf, device=Flux.cpu) where {T <: AbstractFloat}
         each_entry_size = 1 + length(aspace) + 1 + size(sspace, 1) + 1
         buffer_size = min(buffer_size, buff_mem_MB_cap * 2^20 / (4 * each_entry_size)) |> floor |> Int
         buff = zeros(Float32, each_entry_size, buffer_size)
@@ -38,7 +38,11 @@ mutable struct RecurrentDQNLearner{T} <: AbstractHook
         𝐧′ = zeros(Float32, horizon, batch_size) |> device
         minibatch = (𝐞, 𝐨, 𝐚, 𝐫, 𝐨′, 𝐝′, 𝐧′)
         optim = Adam(η)
-        if clipnorm < Inf; optim = Flux.Optimiser(Flux.Optimise.ClipNorm(clipnorm), optim); end
+        if clipnorm < Inf;
+            optim = Flux.Optimiser(Flux.Optimise.ClipNorm(clipnorm), optim)
+        else
+            if clipval < Inf; optim = Flux.Optimiser(Flux.Optimise.ClipNorm(clipnorm), optim); end
+        end
         𝐜 = zeros(Float32, size(get_rnn_state(π.crnn), 1), horizon + 1, batch_size) |> device
         new{T}(π, γ, polyak, min_explore_steps, batch_size, horizon, tbptt_horizon, device, buff, 1, Set{Int}(), minibatch, 𝐜, device(deepcopy(π.π)), device(deepcopy(π.crnn)), device(deepcopy(π.π.qmodel)), optim, Dict{Symbol, Float32}())
     end
@@ -126,11 +130,22 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
     @unpack policy, policy_crnn, γ, ρ, batch_size, horizon, tbptt_horizon, device, 𝐜, qmodel′ = dqn
 
     push_to_buff!(dqn, false, action(env), reward(env), state(env), in_absorbing_state(env), action_space(env))
+    # if in_absorbing_state(env)
+    #     println("pushed end of traj. state=", state(env))
+    # end
 
     if steps >= dqn.min_explore_steps && (steps % (horizon ÷ tbptt_horizon) == 0)
         @debug "sampling trajectories"
         𝐞, 𝐨, 𝐚, 𝐫, 𝐨′, 𝐝′, 𝐧′  = sample_from_buff!(dqn, env)
         # note: 𝐚 is onehot!
+        # println(size(𝐨))
+        # for t in 1:horizon
+        #     println("t=",t)
+        #     println(𝐨[:, t, 1], 𝐚[:, t, 1], 𝐫[t, 1], 𝐨′[:, t, 1], 𝐝′[t, 1], 𝐧′[t, 1])
+        # end
+        @assert mean(𝐝′[horizon, :]) == 1
+        @assert mean(𝐝′[1:horizon-1, :]) == 0
+        @assert mean(𝐧′) == 0
         function dqn_update()
             θ = Flux.params(policy, policy_crnn)
             Flux.reset!(policy_crnn)
@@ -145,6 +160,7 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
             𝐯̂′ = sum(𝛑′ .* 𝐪̂′, dims=1)[:, ]
             𝐨 = reshape(𝐨, :, horizon * batch_size)
             𝐚 = argmax(reshape(𝐚, :, horizon * batch_size), dims=1)[1, :] # CartesianIndices
+            # println(𝐚)
             𝐫 = reshape(𝐫, horizon * batch_size)
             𝐝′ = reshape(𝐝′, horizon * batch_size)
             𝐧′ = reshape(𝐧′, horizon * batch_size)
@@ -159,6 +175,7 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
                 𝐪̂ = policy.qmodel(𝐬)
                 v̄ += Zygote.@ignore mean(sum(policy(𝐬, :) .* 𝐪̂, dims=1))
                 𝛅 = (𝐫 + γ * (1f0 .- 𝐝′) .* 𝐯̂′ - 𝐪̂[𝐚]) .* (1f0 .- 𝐧′)
+                # 𝛅 = (𝐫 + γ * (1f0 .- 𝐝′) .* 𝐯̂′ - 𝐪̂[𝐚])
                 return mean(𝛅.^2)
             end
             Flux.update!(dqn.optim, θ, ∇θℓ)
