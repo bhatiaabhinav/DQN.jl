@@ -10,6 +10,8 @@ mutable struct RecurrentDQNLearner{T} <: AbstractHook
     batch_size::Int
     horizon::Int
     tbptt_horizon::Int
+    train_interval::Int
+    gradsteps::Int
     device
 
     buff::AbstractArray{Float32, 2} # sequence of evidence
@@ -25,7 +27,7 @@ mutable struct RecurrentDQNLearner{T} <: AbstractHook
 
     stats::Dict{Symbol, Float32}
 
-    function RecurrentDQNLearner(π::ContextualDQNPolicy{T}, γ::Real, horizon::Int, aspace::MDPs.IntegerSpace, sspace; η=0.0003, polyak=0.995, batch_size=32, min_explore_steps=horizon*batch_size, tbptt_horizon=horizon, buffer_size=10000000, buff_mem_MB_cap=Inf, clipnorm=Inf, clipval=Inf, device=Flux.cpu) where {T <: AbstractFloat}
+    function RecurrentDQNLearner(π::ContextualDQNPolicy{T}, γ::Real, horizon::Int, aspace::MDPs.IntegerSpace, sspace; η=0.0003, polyak=0.995, batch_size=32, min_explore_steps=horizon*batch_size, tbptt_horizon=horizon, train_interval=horizon, gradsteps=4, buffer_size=10000000, buff_mem_MB_cap=Inf, clipnorm=Inf, clipval=Inf, device=Flux.cpu) where {T <: AbstractFloat}
         each_entry_size = 1 + length(aspace) + 1 + size(sspace, 1) + 1
         buffer_size = min(buffer_size, buff_mem_MB_cap * 2^20 / (4 * each_entry_size)) |> floor |> Int
         buff = zeros(Float32, each_entry_size, buffer_size)
@@ -44,7 +46,7 @@ mutable struct RecurrentDQNLearner{T} <: AbstractHook
             if clipval < Inf; optim = Flux.Optimiser(Flux.Optimise.ClipNorm(clipnorm), optim); end
         end
         𝐜 = zeros(Float32, size(get_rnn_state(π.crnn), 1), horizon + 1, batch_size) |> device
-        new{T}(π, γ, polyak, min_explore_steps, batch_size, horizon, tbptt_horizon, device, buff, 1, Set{Int}(), minibatch, 𝐜, device(deepcopy(π.π)), device(deepcopy(π.crnn)), device(deepcopy(π.π.qmodel)), optim, Dict{Symbol, Float32}())
+        new{T}(π, γ, polyak, min_explore_steps, batch_size, horizon, tbptt_horizon, train_interval, gradsteps, device, buff, 1, Set{Int}(), minibatch, 𝐜, device(deepcopy(π.π)), device(deepcopy(π.crnn)), device(deepcopy(π.π.qmodel)), optim, Dict{Symbol, Float32}())
     end
 end
 
@@ -127,26 +129,19 @@ function preepisode(dqn::RecurrentDQNLearner; env, kwargs...)
 end
 
 function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int}, steps::Int, returns, rng::AbstractRNG, kwargs...) where {T}
-    @unpack policy, policy_crnn, γ, ρ, batch_size, horizon, tbptt_horizon, device, 𝐜, qmodel′ = dqn
+    @unpack policy, policy_crnn, γ, ρ, batch_size, horizon, tbptt_horizon, train_interval, gradsteps, device, 𝐜, qmodel′ = dqn
 
     push_to_buff!(dqn, false, action(env), reward(env), state(env), in_absorbing_state(env), action_space(env))
     # if in_absorbing_state(env)
     #     println("pushed end of traj. state=", state(env))
     # end
 
-    if steps >= dqn.min_explore_steps && (steps % (horizon ÷ tbptt_horizon) == 0)
+    if steps >= dqn.min_explore_steps && (steps % train_interval == 0)
         @debug "sampling trajectories"
-        𝐞, 𝐨, 𝐚, 𝐫, 𝐨′, 𝐝′, 𝐧′  = sample_from_buff!(dqn, env)
-        # note: 𝐚 is onehot!
-        # println(size(𝐨))
-        # for t in 1:horizon
-        #     println("t=",t)
-        #     println(𝐨[:, t, 1], 𝐚[:, t, 1], 𝐫[t, 1], 𝐨′[:, t, 1], 𝐝′[t, 1], 𝐧′[t, 1])
-        # end
-        @assert mean(𝐝′[horizon, :]) == 1
-        @assert mean(𝐝′[1:horizon-1, :]) == 0
-        @assert mean(𝐧′) == 0
         function dqn_update()
+            𝐞, 𝐨, 𝐚, 𝐫, 𝐨′, 𝐝′, 𝐧′  = sample_from_buff!(dqn, env)
+            # note: 𝐚 is onehot!
+            losses, vals, mingrads, maxgrads = [], [], [], []
             θ = Flux.params(policy, policy_crnn)
             Flux.reset!(policy_crnn)
             fill!(𝐜, 0f0)
@@ -154,32 +149,51 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
                 𝐜[:, t, :] .= @views policy_crnn(𝐞[:, t, :])
             end
             𝐜′ = @view 𝐜[:, 2:end, :]
-            𝐬′ = reshape(vcat(𝐜′, 𝐨′), :, horizon * batch_size)
-            𝛑′ = policy(𝐬′, :)
-            𝐪̂′ = qmodel′(𝐬′)
-            𝐯̂′ = sum(𝛑′ .* 𝐪̂′, dims=1)[:, ]
-            𝐨 = reshape(𝐨, :, horizon * batch_size)
-            𝐚 = argmax(reshape(𝐚, :, horizon * batch_size), dims=1)[1, :] # CartesianIndices
-            # println(𝐚)
-            𝐫 = reshape(𝐫, horizon * batch_size)
-            𝐝′ = reshape(𝐝′, horizon * batch_size)
-            𝐧′ = reshape(𝐧′, horizon * batch_size)
-            v̄ = 0f0
             Flux.reset!(policy_crnn)
-            ℓ, ∇θℓ = Flux.Zygote.withgradient(θ) do
-                _𝐜 = reduce(hcat, map(1:horizon) do t
-                    @views reshape(policy_crnn(𝐞[:, t, :]), :, 1, batch_size)
-                end)
-                _𝐜 = reshape(_𝐜, :, horizon * batch_size)
-                𝐬 = vcat(_𝐜, 𝐨)
-                𝐪̂ = policy.qmodel(𝐬)
-                v̄ += Zygote.@ignore mean(sum(policy(𝐬, :) .* 𝐪̂, dims=1))
-                𝛅 = (𝐫 + γ * (1f0 .- 𝐝′) .* 𝐯̂′ - 𝐪̂[𝐚]) .* (1f0 .- 𝐧′)
-                # 𝛅 = (𝐫 + γ * (1f0 .- 𝐝′) .* 𝐯̂′ - 𝐪̂[𝐚])
-                return mean(𝛅.^2)
+            for timechunk in splitequal(horizon, tbptt_horizon)
+                𝐬′ = reshape(vcat(𝐜′[:, timechunk, :], 𝐨′[:, timechunk, :]), :, length(timechunk) * batch_size)
+                𝛑′ = policy(𝐬′, :)
+                𝐪̂′ = qmodel′(𝐬′)
+                𝐯̂′ = sum(𝛑′ .* 𝐪̂′, dims=1)[:, ]
+                _𝐨 = reshape(𝐨[:, timechunk, :], :, length(timechunk) * batch_size)
+                _𝐚 = argmax(reshape(𝐚[:, timechunk, :], :, length(timechunk) * batch_size), dims=1)[1, :] # CartesianIndices
+                _𝐫 = reshape(𝐫[timechunk, :], length(timechunk) * batch_size)
+                _𝐝′ = reshape(𝐝′[timechunk, :], length(timechunk) * batch_size)
+                # _𝐧′ = reshape(𝐧′[timechunk, :], length(timechunk) * batch_size)
+                v̄ = 0f0
+                ℓ, ∇θℓ = Flux.Zygote.withgradient(θ) do
+                    _𝐜 = reduce(hcat, map(timechunk) do t
+                        @views reshape(policy_crnn(𝐞[:, t, :]), :, 1, batch_size)
+                    end)
+                    _𝐜 = reshape(_𝐜, :, length(timechunk) * batch_size)
+                    _𝐬 = vcat(_𝐜, _𝐨)
+                    𝐪̂ = policy.qmodel(_𝐬)
+                    v̄ += Zygote.@ignore mean(sum(policy(_𝐬, :) .* 𝐪̂, dims=1))
+                    # 𝛅 = (_𝐫 + γ * (1f0 .- _𝐝′) .* 𝐯̂′ - 𝐪̂[_𝐚]) .* (1f0 .- _𝐧′)
+                    𝛅 = (_𝐫 + γ * (1f0 .- _𝐝′) .* 𝐯̂′ - 𝐪̂[_𝐚])
+                    return mean(𝛅.^2)
+                end
+
+                # println((steps, timechunk))
+                mingrad, maxgrad = Inf, 0
+                # println(length(θ))
+                for par in θ
+                    gr = ∇θℓ[par]
+                    if isnothing(gr)
+                        println("no grad! ", par)
+                    end
+                    gradnorm = sqrt(sum(gr.^2))
+                    mingrad = min(gradnorm, mingrad)
+                    maxgrad = max(gradnorm, maxgrad)
+                end
+                push!(mingrads, mingrad)
+                push!(maxgrads, maxgrad)
+
+                Flux.update!(dqn.optim, θ, ∇θℓ)
+                push!(losses, ℓ)
+                push!(vals, v̄)
             end
-            Flux.update!(dqn.optim, θ, ∇θℓ)
-            return ℓ, v̄
+            return mean(losses), mean(vals), minimum(mingrads), maximum(maxgrads)
         end
 
         function target_network_update()
@@ -199,7 +213,13 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
         end
 
         @debug "dqn update"
-        ℓ, v̄ = dqn_update()
+        for gradstep in 1:gradsteps
+            ℓ, v̄, mingradnorm, maxgradnorm = dqn_update()
+            dqn.stats[:ℓ] = ℓ
+            dqn.stats[:v̄] = v̄
+            dqn.stats[:min_gradnorm] = mingradnorm
+            dqn.stats[:max_gradnorm] = maxgradnorm
+        end
 
         @debug "target network update"
         target_network_update()
@@ -208,8 +228,7 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
         copy_back_policy_params()
 
         episodes = length(returns)
-        dqn.stats[:ℓ] = ℓ
-        dqn.stats[:v̄] = v̄
+        
         @debug "learning stats" steps episodes dqn.stats...
     end
     nothing
