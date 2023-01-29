@@ -69,15 +69,16 @@ function poststep(dqn::DQNLearner{T}; env::AbstractMDP{Vector{T}, Int}, steps::I
 
             Flux.update!(dqn.optim, θ, ∇θℓ)
 
+            v̄ = mean(sum(π(𝐬, :) .* π.qmodel(𝐬), dims=1))
+            dqn.stats[:v̄] = v̄
             dqn.stats[:ℓ] = ℓ
         end
 
+        θ = Flux.params(π.qmodel)
         θ′ = Flux.params(qmodel′)
         Flux.loadparams!(qmodel′, ρ .* θ′ .+ (1 - ρ) .* θ)
 
         if steps % 1000 == 0
-            v̄ = mean(sum(π(𝐬, :) .* π.qmodel(𝐬), dims=1))
-            dqn.stats[:v̄] = v̄
             episodes = length(returns)
             @debug "learning stats" steps episodes dqn.stats...
         end

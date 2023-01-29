@@ -16,7 +16,7 @@ mutable struct ContextualDQNPolicy{T <: AbstractFloat} <: AbstractPolicy{Vector{
     prev_a::Vector{Float32}
     prev_r::Float32
     function ContextualDQNPolicy(π::DQNPolicy{T}, crnn::GRUContextRNN) where {T}
-        new{T}(π, crnn, zeros(Float32, size(get_rnn_state(crnn), 1), 1), 1f0, zeros(Float32, π.n), 0f0)
+        new{T}(π, crnn, zeros(Float32, size(get_start_state(crnn), 1), 1), 1f0, zeros(Float32, π.n), 0f0)
     end
 end
 
@@ -47,7 +47,7 @@ function MDPs.preepisode(p::ContextualDQNPolicy{T}; kwargs...) where {T}
     p.isnewtraj = 1f0
     fill!(p.prev_a, 0f0)
     p.prev_r = 0
-    fill!(p.context, 0f0)
+    copy!(p.context, get_start_state(p.crnn))
     nothing
 end
 

@@ -150,28 +150,55 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
             end
             𝐜′ = @view 𝐜[:, 2:end, :]
             Flux.reset!(policy_crnn)
-            for timechunk in splitequal(horizon, tbptt_horizon)
-                𝐬′ = reshape(vcat(𝐜′[:, timechunk, :], 𝐨′[:, timechunk, :]), :, length(timechunk) * batch_size)
-                𝛑′ = policy(𝐬′, :)
-                𝐪̂′ = qmodel′(𝐬′)
-                𝐯̂′ = sum(𝛑′ .* 𝐪̂′, dims=1)[:, ]
-                _𝐨 = reshape(𝐨[:, timechunk, :], :, length(timechunk) * batch_size)
-                _𝐚 = argmax(reshape(𝐚[:, timechunk, :], :, length(timechunk) * batch_size), dims=1)[1, :] # CartesianIndices
-                _𝐫 = reshape(𝐫[timechunk, :], length(timechunk) * batch_size)
-                _𝐝′ = reshape(𝐝′[timechunk, :], length(timechunk) * batch_size)
-                # _𝐧′ = reshape(𝐧′[timechunk, :], length(timechunk) * batch_size)
+            chunks = splitequal(horizon, tbptt_horizon)
+            # if horizon == tbptt_horizon
+            #     chunks = [:]
+            # end
+            for timechunk in chunks
+                if horizon != tbptt_horizon
+                    𝐬′ = @views reshape(vcat(𝐜′[:, timechunk, :], 𝐨′[:, timechunk, :]), :, tbptt_horizon * batch_size)
+                    𝛑′ = policy(𝐬′, :)
+                    𝐪̂′ = qmodel′(𝐬′)
+                    𝐯̂′ = sum(𝛑′ .* 𝐪̂′, dims=1)[1, :]
+                    _𝐨 = @views reshape(𝐨[:, timechunk, :], :, tbptt_horizon * batch_size)
+                    _𝐚 = @views argmax(reshape(𝐚[:, timechunk, :], :, tbptt_horizon * batch_size), dims=1)[1, :] # CartesianIndices
+                    _𝐫 = @views reshape(𝐫[timechunk, :], tbptt_horizon * batch_size)
+                    _𝐝′ = @views reshape(𝐝′[timechunk, :], tbptt_horizon * batch_size)
+                else
+                    𝐬′ = reshape(vcat(𝐜′, 𝐨′), :, tbptt_horizon * batch_size)
+                    𝛑′ = policy(𝐬′, :)
+                    𝐪̂′ = qmodel′(𝐬′)
+                    𝐯̂′ = sum(𝛑′ .* 𝐪̂′, dims=1)[1, :]
+                    _𝐨 = reshape(𝐨, :, tbptt_horizon * batch_size)
+                    _𝐚 = argmax(reshape(𝐚, :, tbptt_horizon * batch_size), dims=1)[1, :] # CartesianIndices
+                    _𝐫 = reshape(𝐫, tbptt_horizon * batch_size)
+                    _𝐝′ = reshape(𝐝′, tbptt_horizon * batch_size)
+                end
+                # _𝐧′ = reshape(𝐧′[timechunk, :], tbptt_horizon * batch_size)
                 v̄ = 0f0
                 ℓ, ∇θℓ = Flux.Zygote.withgradient(θ) do
-                    _𝐜 = reduce(hcat, map(timechunk) do t
-                        @views reshape(policy_crnn(𝐞[:, t, :]), :, 1, batch_size)
-                    end)
-                    _𝐜 = reshape(_𝐜, :, length(timechunk) * batch_size)
+                    # TODO: THIS IS A BUG. DO NOT USE `map` WITH RNNs:
+                    # _𝐜 = reduce(hcat, map(timechunk) do t
+                    #     @views reshape(policy_crnn(𝐞[:, t, :]), :, 1, batch_size)
+                    # end)
+                    _𝐜s = @views [reshape(policy_crnn(𝐞[:, t, :]), :, 1, batch_size) for t in timechunk]
+                    _𝐜 = reduce(hcat ,_𝐜s)
+                    _𝐜 = reshape(_𝐜, :, tbptt_horizon * batch_size)
                     _𝐬 = vcat(_𝐜, _𝐨)
                     𝐪̂ = policy.qmodel(_𝐬)
                     v̄ += Zygote.@ignore mean(sum(policy(_𝐬, :) .* 𝐪̂, dims=1))
-                    # 𝛅 = (_𝐫 + γ * (1f0 .- _𝐝′) .* 𝐯̂′ - 𝐪̂[_𝐚]) .* (1f0 .- _𝐧′)
-                    𝛅 = (_𝐫 + γ * (1f0 .- _𝐝′) .* 𝐯̂′ - 𝐪̂[_𝐚])
-                    return mean(𝛅.^2)
+                    # # 𝛅 = (_𝐫 + γ * (1f0 .- _𝐝′) .* 𝐯̂′ - 𝐪̂[_𝐚]) .* (1f0 .- _𝐧′)
+                    # 𝛅 = (_𝐫 + γ * (1f0 .- _𝐝′) .* 𝐯̂′ - 𝐪̂[_𝐚])
+                    # return mean(𝛅.^2)
+                    # println("here")
+                    𝐪 = Flux.Zygote.ignore() do
+                        # 𝛅 = 𝐪̂′            # to reuse an array lying on the gpu
+                        # fill!(𝛅, 0f0)
+                        𝛅 = device(zeros(Float32, size(𝐪̂))) # TD error
+                        𝛅[_𝐚] = _𝐫 + (1f0 .- _𝐝′) * γ .* 𝐯̂′ - @view 𝐪̂[_𝐚]
+                        𝐪̂ + 𝛅
+                    end
+                    Flux.mse(𝐪̂, 𝐪)
                 end
 
                 # println((steps, timechunk))
@@ -180,11 +207,17 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
                 for par in θ
                     gr = ∇θℓ[par]
                     if isnothing(gr)
-                        println("no grad! ", par)
+                        if par === policy_crnn.model.layers[end].cell.state0
+                            # Chill! State0 is expected to have a gradient only for the first timechunk
+                            # println("no grad, but it's ok", par)
+                        else
+                            println("no grad, and that's not ok!", par)
+                        end
+                    else
+                        gradnorm = sqrt(sum(gr.^2))
+                        mingrad = min(gradnorm, mingrad)
+                        maxgrad = max(gradnorm, maxgrad)
                     end
-                    gradnorm = sqrt(sum(gr.^2))
-                    mingrad = min(gradnorm, mingrad)
-                    maxgrad = max(gradnorm, maxgrad)
                 end
                 push!(mingrads, mingrad)
                 push!(maxgrads, maxgrad)
