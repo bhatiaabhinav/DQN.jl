@@ -1,8 +1,29 @@
 using MDPs
 using Random
 using Flux
+using StatsBase
 
-export DQNPolicy, EpsilonDecayHook
+export DQNPolicy, DualingDQNModel, EpsilonDecayHook
+
+
+mutable struct DualingDQNModel
+    common_network
+    value_network
+    advantage_network
+end
+
+Flux.@functor DualingDQNModel
+
+function (m::DualingDQNModel)(x)
+    if !isnothing(m.common_network)
+        x = m.common_network(x)
+    end
+    advantages = m.advantage_network(x)
+    value = m.value_network(x)
+    action_values = value .+ advantages .- mean(advantages; dims=1)
+    return action_values
+end
+
 
 
 mutable struct DQNPolicy{T<:AbstractFloat} <: AbstractPolicy{Vector{T}, Int}
