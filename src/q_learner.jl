@@ -76,12 +76,10 @@ function poststep(dqn::DQNLearner{T}; env::AbstractMDP{Vector{T}, Int}, steps::I
             copy!(param′, ρ * param′ + (1 - ρ) * param)
         end
 
-        if device == gpu
-            θ = Flux.params(π_gpu.qmodel)
-            θcpu = Flux.params(dqn.π.qmodel)
-            for (param, param_cpu) in zip(θ, θcpu)
-                copy!(param_cpu, param)
-            end
+        θ = Flux.params(π_gpu.qmodel)
+        θcpu = Flux.params(dqn.π.qmodel)
+        for (param, param_cpu) in zip(θ, θcpu)
+            copy!(param_cpu, param)
         end
 
         if steps % 1000 == 0
