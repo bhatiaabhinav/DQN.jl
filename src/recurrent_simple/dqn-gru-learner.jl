@@ -177,20 +177,12 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
                 # _𝐧′ = reshape(𝐧′[timechunk, :], tbptt_horizon * batch_size)
                 v̄ = 0f0
                 ℓ, ∇θℓ = Flux.Zygote.withgradient(θ) do
-                    # TODO: THIS IS A BUG. DO NOT USE `map` WITH RNNs:
-                    # _𝐜 = reduce(hcat, map(timechunk) do t
-                    #     @views reshape(policy_crnn(𝐞[:, t, :]), :, 1, batch_size)
-                    # end)
                     _𝐜s = @views [reshape(policy_crnn(𝐞[:, t, :]), :, 1, batch_size) for t in timechunk]
                     _𝐜 = reduce(hcat ,_𝐜s)
                     _𝐜 = reshape(_𝐜, :, tbptt_horizon * batch_size)
                     _𝐬 = vcat(_𝐜, _𝐨)
                     𝐪̂ = policy.qmodel(_𝐬)
                     v̄ += Zygote.@ignore mean(sum(policy(_𝐬, :) .* 𝐪̂, dims=1))
-                    # # 𝛅 = (_𝐫 + γ * (1f0 .- _𝐝′) .* 𝐯̂′ - 𝐪̂[_𝐚]) .* (1f0 .- _𝐧′)
-                    # 𝛅 = (_𝐫 + γ * (1f0 .- _𝐝′) .* 𝐯̂′ - 𝐪̂[_𝐚])
-                    # return mean(𝛅.^2)
-                    # println("here")
                     𝐪 = Flux.Zygote.ignore() do
                         # 𝛅 = 𝐪̂′            # to reuse an array lying on the gpu
                         # fill!(𝛅, 0f0)
@@ -201,15 +193,12 @@ function poststep(dqn::RecurrentDQNLearner{T}; env::AbstractMDP{Vector{T}, Int},
                     Flux.mse(𝐪̂, 𝐪)
                 end
 
-                # println((steps, timechunk))
                 mingrad, maxgrad = Inf, 0
-                # println(length(θ))
                 for par in θ
                     gr = ∇θℓ[par]
                     if isnothing(gr)
                         if par === policy_crnn.model.layers[end].cell.state0
                             # Chill! State0 is expected to have a gradient only for the first timechunk
-                            # println("no grad, but it's ok", par)
                         else
                             println("no grad, and that's not ok!", par)
                         end
